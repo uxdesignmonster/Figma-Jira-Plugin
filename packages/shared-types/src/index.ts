@@ -10,6 +10,7 @@ export type JiraTicketSummary = {
 
 export type BackendErrorCode =
   | "unauthenticated"
+  | "reauth_required"
   | "not_found"
   | "upstream_error"
   | "bad_request";
@@ -18,6 +19,8 @@ export type BackendError = {
   code: BackendErrorCode;
   message: string;
 };
+
+export type JiraTicketSearchResult = JiraTicketSummary;
 
 export type JiraSiteSummary = {
   cloudId: string;

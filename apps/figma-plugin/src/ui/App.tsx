@@ -5,6 +5,7 @@ import type {
   UiToPluginMessage,
 } from "@figma-jira/shared-types";
 import { createApiClient, type ApiClient } from "./api";
+import { SearchScreen } from "./SearchScreen";
 
 type ViewState =
   | { kind: "booting" }
@@ -144,7 +145,7 @@ export function App() {
   }, [view, checkStatus]);
 
   const startAuth = useCallback(() => {
-    if (view.kind !== "not_connected" && view.kind !== "error") return;
+    if (view.kind === "booting") return;
     const api = apiRef.current;
     if (!api) return;
     postToPlugin({ type: "open-external", url: api.authStartUrl() });
@@ -209,10 +210,18 @@ export function App() {
             }
           />
         );
-      case "connected":
+      case "connected": {
+        const api = apiRef.current;
+        if (!api) return <Centered>Loading…</Centered>;
         return (
-          <ConnectedView status={view.status} onDisconnect={disconnect} />
+          <ConnectedView
+            api={api}
+            status={view.status}
+            onDisconnect={disconnect}
+            onReauth={startAuth}
+          />
         );
+      }
       case "error":
         return <ErrorView message={view.message} onRetry={recheck} />;
     }
@@ -222,7 +231,7 @@ export function App() {
     <main style={styles.root}>
       <header style={styles.header}>
         <h1 style={styles.title}>Jira Tickets</h1>
-        <p style={styles.subtitle}>Phase 2 — connect your Jira account</p>
+        <p style={styles.subtitle}>Search and select an issue to place on the canvas.</p>
       </header>
       <section style={styles.section}>{body}</section>
       <footer style={styles.footer}>
@@ -273,34 +282,19 @@ function ConnectingView({ onRetry }: { onRetry: () => void }) {
 }
 
 function ConnectedView({
+  api,
   status,
   onDisconnect,
+  onReauth,
 }: {
+  api: ApiClient;
   status: Extract<ConnectionStatus, { connected: true }>;
   onDisconnect: () => void;
+  onReauth: () => void;
 }) {
-  const who =
-    status.account.displayName ??
-    status.account.email ??
-    status.account.accountId ??
-    "Connected";
   return (
     <>
-      <div style={styles.card}>
-        <div style={styles.cardRow}>
-          <span style={styles.cardLabel}>Site</span>
-          <span style={styles.cardValue}>{status.site.name}</span>
-        </div>
-        <div style={styles.cardRow}>
-          <span style={styles.cardLabel}>URL</span>
-          <span style={styles.cardValue}>{status.site.url}</span>
-        </div>
-        <div style={styles.cardRow}>
-          <span style={styles.cardLabel}>Account</span>
-          <span style={styles.cardValue}>{who}</span>
-        </div>
-      </div>
-      <p style={styles.hint}>Issue search lands in the next phase.</p>
+      <SearchScreen api={api} connection={status} onReauth={onReauth} />
       <button style={styles.buttonDanger} onClick={onDisconnect}>
         Disconnect
       </button>
@@ -345,18 +339,6 @@ const styles: Record<string, React.CSSProperties> = {
   section: { flex: 1, display: "flex", flexDirection: "column", gap: 12 },
   body: { margin: 0, lineHeight: 1.5 },
   hint: { color: "#888", margin: 0 },
-  card: {
-    border: "1px solid #E5E7EB",
-    borderRadius: 8,
-    padding: 12,
-    display: "flex",
-    flexDirection: "column",
-    gap: 6,
-    background: "#FAFAFA",
-  },
-  cardRow: { display: "flex", gap: 8, alignItems: "baseline" },
-  cardLabel: { width: 64, color: "#6B7280" },
-  cardValue: { flex: 1, fontWeight: 500, wordBreak: "break-word" },
   footer: {
     display: "flex",
     justifyContent: "flex-end",

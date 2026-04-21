@@ -77,8 +77,35 @@ Then load `apps/figma-plugin/manifest.json` and `apps/figma-widget/manifest.json
 5. Back in the plugin, the UI polls `/auth/status` and switches to the connected view automatically.
 6. **Disconnect** clears the tokens on the backend.
 
+## Jira issue API (Phase 3)
+
+The backend exposes two authenticated endpoints for the plugin:
+
+| Endpoint | Returns |
+| --- | --- |
+| `GET /api/issues/search?installationId=…&q=…` | `SearchIssuesResponse` — up to 20 `JiraTicketSummary` results, exact issue-key matches prepended |
+| `GET /api/issues/:issueKey?installationId=…` | `GetIssueResponse` — a single `JiraTicketSummary` |
+
+Both return the shared envelope `{ ok: true, … } | { ok: false, error: { code, message } }`. Error codes: `unauthenticated`, `reauth_required`, `not_found`, `upstream_error`, `bad_request`.
+
+Token handling is centralized in `apps/backend/src/jira/client.ts`:
+
+- Refreshes access tokens proactively when within 60s of expiry.
+- Retries once on a 401 response with a refreshed token.
+- Surfaces `reauth_required` (and drops the stored connection) when the refresh token itself is rejected.
+
+The plugin's **Reconnect Jira** button on an auth error loops the user back through the OAuth flow.
+
+### Testing the search flow locally
+
+1. Complete Phase 2 auth so the plugin is connected.
+2. Type at least 2 characters into the search input — results appear after a 300ms debounce.
+3. Paste an issue key like `ABC-123` to jump straight to that ticket (exact match is prepended to results).
+4. Click a row to select it. The **Selected** panel appears; the insert button is intentionally disabled until Phase 4.
+5. Force a reauth path by revoking the OAuth grant in Atlassian (User menu → Settings → Connected apps) and searching again — the UI should show **Reconnect Jira**.
+
 ## Status
 
-Phase 2 complete: Jira OAuth 3LO + plugin connection flow. Tokens stored only on the backend (in-memory for now; swap to Postgres via `TokenStore`).
+Phase 3 complete: token refresh, issue search, get-by-key, plugin search UI with selection state.
 
-Next phases: issue search endpoint, get-issue-by-key, plugin search UI; then widget insertion; then webhooks.
+Next phase: widget insertion flow (plugin → widget synced state), canvas rendering, and a manual refresh button on the widget.
