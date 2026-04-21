@@ -1,0 +1,12 @@
+{
+  "name": "Jira Tickets (Plugin)",
+  "id": "figma-jira-plugin-dev",
+  "api": "1.0.0",
+  "main": "dist/code.js",
+  "ui": "dist/ui.html",
+  "editorType": ["figma", "figjam"],
+  "networkAccess": {
+    "allowedDomains": ["http://localhost:4000", "https://*.atlassian.net"],
+    "reasoning": "Talks to the local backend for Jira OAuth + issue fetching."
+  }
+}

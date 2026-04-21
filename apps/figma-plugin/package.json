@@ -1,0 +1,29 @@
+{
+  "name": "@figma-jira/figma-plugin",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Figma plugin: auth flow, Jira issue search, widget insertion",
+  "scripts": {
+    "build:code": "esbuild src/code.ts --bundle --platform=browser --target=es2017 --format=iife --outfile=dist/code.js",
+    "build:ui": "vite build",
+    "build": "npm run build:code && npm run build:ui",
+    "dev:code": "esbuild src/code.ts --bundle --platform=browser --target=es2017 --format=iife --outfile=dist/code.js --watch",
+    "dev:ui": "vite build --watch",
+    "dev": "npm run build:code && npm run build:ui && npm run dev:code & npm run dev:ui",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@figma-jira/shared-types": "*",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@figma/plugin-typings": "^1.100.2",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "esbuild": "^0.21.5",
+    "vite": "^5.3.3",
+    "vite-plugin-singlefile": "^2.0.2"
+  }
+}

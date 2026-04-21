@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "types": ["@figma/plugin-typings"],
+    "noEmit": true,
+    "paths": {
+      "@figma-jira/shared-types": ["../../packages/shared-types/src"]
+    }
+  },
+  "include": ["src/**/*"]
+}

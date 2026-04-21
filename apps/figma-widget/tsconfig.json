@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react",
+    "jsxFactory": "figma.widget.h",
+    "jsxFragmentFactory": "figma.widget.Fragment",
+    "lib": ["ES2020"],
+    "types": ["@figma/plugin-typings", "@figma/widget-typings"],
+    "noEmit": true,
+    "paths": {
+      "@figma-jira/shared-types": ["../../packages/shared-types/src"]
+    }
+  },
+  "include": ["src/**/*"]
+}

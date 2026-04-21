@@ -1,0 +1,23 @@
+{
+  "name": "figma-jira-plugin",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Figma + Jira integration: widget, plugin, and backend",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "dev:plugin": "npm run dev --workspace apps/figma-plugin",
+    "dev:widget": "npm run dev --workspace apps/figma-widget",
+    "dev:backend": "npm run dev --workspace apps/backend",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
