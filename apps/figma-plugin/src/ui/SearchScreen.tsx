@@ -3,8 +3,20 @@ import type {
   BackendError,
   ConnectionStatus,
   JiraTicketSummary,
+  PluginToUiMessage,
+  UiToPluginMessage,
 } from "@figma-jira/shared-types";
 import type { ApiClient } from "./api";
+
+function postToPlugin(msg: UiToPluginMessage) {
+  parent.postMessage({ pluginMessage: msg }, "*");
+}
+
+type InsertStatus =
+  | { kind: "idle" }
+  | { kind: "inserting" }
+  | { kind: "inserted"; issueKey: string }
+  | { kind: "error"; message: string };
 
 type Props = {
   api: ApiClient;
@@ -26,7 +38,35 @@ export function SearchScreen({ api, connection, onReauth }: Props) {
   const [query, setQuery] = useState("");
   const [state, setState] = useState<SearchState>({ kind: "idle" });
   const [selected, setSelected] = useState<JiraTicketSummary | null>(null);
+  const [insertStatus, setInsertStatus] = useState<InsertStatus>({
+    kind: "idle",
+  });
   const requestSeq = useRef(0);
+
+  // Listen for insert-widget results from the plugin sandbox.
+  useEffect(() => {
+    const handler = (event: MessageEvent) => {
+      const msg = event.data?.pluginMessage as PluginToUiMessage | undefined;
+      if (!msg || msg.type !== "insert-widget-result") return;
+      if (msg.ok) {
+        setInsertStatus({ kind: "inserted", issueKey: msg.issueKey });
+      } else {
+        setInsertStatus({ kind: "error", message: msg.error });
+      }
+    };
+    window.addEventListener("message", handler);
+    return () => window.removeEventListener("message", handler);
+  }, []);
+
+  // Reset insert status whenever the user switches selection.
+  useEffect(() => {
+    setInsertStatus({ kind: "idle" });
+  }, [selected?.issueId]);
+
+  const handleInsert = (ticket: JiraTicketSummary) => {
+    setInsertStatus({ kind: "inserting" });
+    postToPlugin({ type: "insert-widget", ticket });
+  };
 
   useEffect(() => {
     const trimmed = query.trim();
@@ -124,7 +164,12 @@ export function SearchScreen({ api, connection, onReauth }: Props) {
       <div style={styles.results}>{resultList}</div>
 
       {selected && (
-        <SelectedPanel ticket={selected} onClear={() => setSelected(null)} />
+        <SelectedPanel
+          ticket={selected}
+          status={insertStatus}
+          onClear={() => setSelected(null)}
+          onInsert={() => handleInsert(selected)}
+        />
       )}
     </>
   );
@@ -161,11 +206,16 @@ function ResultRow({
 
 function SelectedPanel({
   ticket,
+  status,
   onClear,
+  onInsert,
 }: {
   ticket: JiraTicketSummary;
+  status: InsertStatus;
   onClear: () => void;
+  onInsert: () => void;
 }) {
+  const inserting = status.kind === "inserting";
   return (
     <div style={styles.selected}>
       <div style={styles.selectedHeader}>
@@ -177,9 +227,24 @@ function SelectedPanel({
       <div style={styles.selectedBody}>
         <strong>{ticket.issueKey}</strong> — {ticket.summary || "(no summary)"}
       </div>
-      <button style={styles.buttonPrimary} disabled>
-        Insert to canvas (Phase 4)
+      <button
+        style={{
+          ...styles.buttonPrimary,
+          ...(inserting ? styles.buttonDisabled : null),
+        }}
+        onClick={onInsert}
+        disabled={inserting}
+      >
+        {inserting ? "Inserting…" : "Insert ticket on canvas"}
       </button>
+      {status.kind === "inserted" && (
+        <p style={styles.insertSuccess}>
+          Inserted {status.issueKey} on the canvas.
+        </p>
+      )}
+      {status.kind === "error" && (
+        <p style={styles.insertError}>{status.message}</p>
+      )}
     </div>
   );
 }
@@ -302,5 +367,19 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: "pointer",
     fontWeight: 500,
     alignSelf: "flex-start",
+  },
+  buttonDisabled: {
+    background: "#7FA8FF",
+    cursor: "default",
+  },
+  insertSuccess: {
+    margin: 0,
+    color: "#116633",
+    fontSize: 11,
+  },
+  insertError: {
+    margin: 0,
+    color: "#B00020",
+    fontSize: 11,
   },
 };

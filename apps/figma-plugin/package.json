@@ -2,15 +2,15 @@
   "name": "@figma-jira/figma-plugin",
   "version": "0.0.1",
   "private": true,
-  "description": "Figma plugin: auth flow, Jira issue search, widget insertion",
+  "description": "Figma plugin + widget: Jira auth, issue search, widget insertion, and refresh",
   "scripts": {
-    "build:code": "esbuild src/code.ts --bundle --platform=browser --target=es2017 --format=iife --outfile=dist/code.js",
+    "build:code": "esbuild src/code.tsx --bundle --platform=browser --target=es2017 --format=iife --outfile=dist/code.js --jsx-factory=figma.widget.h --jsx-fragment=figma.widget.Fragment",
     "build:ui": "vite build",
     "build": "npm run build:code && npm run build:ui",
-    "dev:code": "esbuild src/code.ts --bundle --platform=browser --target=es2017 --format=iife --outfile=dist/code.js --watch",
+    "dev:code": "esbuild src/code.tsx --bundle --platform=browser --target=es2017 --format=iife --outfile=dist/code.js --jsx-factory=figma.widget.h --jsx-fragment=figma.widget.Fragment --watch",
     "dev:ui": "vite build --watch",
-    "dev": "npm run build:code && npm run build:ui && npm run dev:code & npm run dev:ui",
-    "typecheck": "tsc --noEmit"
+    "dev": "npm run build && (npm run dev:code & npm run dev:ui)",
+    "typecheck": "tsc -p tsconfig.sandbox.json --noEmit && tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@figma-jira/shared-types": "*",
@@ -19,6 +19,7 @@
   },
   "devDependencies": {
     "@figma/plugin-typings": "^1.100.2",
+    "@figma/widget-typings": "^1.10.0",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",

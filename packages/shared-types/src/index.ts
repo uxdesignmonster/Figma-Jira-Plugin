@@ -22,6 +22,17 @@ export type BackendError = {
 
 export type JiraTicketSearchResult = JiraTicketSummary;
 
+/**
+ * Shape of a widget's on-canvas synced state. Keep this narrow and
+ * render-focused — the widget is not a second source of truth.
+ */
+export type WidgetTicketState = {
+  ticket: JiraTicketSummary | null;
+  lastSyncedAt: string | null;
+  isLoading: boolean;
+  error: string | null;
+};
+
 export type JiraSiteSummary = {
   cloudId: string;
   url: string;
@@ -54,7 +65,8 @@ export type SearchIssuesResponse =
 // Messages from plugin sandbox (code.ts) → UI iframe.
 export type PluginToUiMessage =
   | { type: "init"; installationId: string; backendUrl: string }
-  | { type: "insert-widget-result"; ok: boolean };
+  | { type: "insert-widget-result"; ok: true; issueKey: string }
+  | { type: "insert-widget-result"; ok: false; error: string };
 
 // Messages from UI iframe → plugin sandbox.
 export type UiToPluginMessage =

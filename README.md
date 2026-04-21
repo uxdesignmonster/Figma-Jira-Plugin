@@ -4,15 +4,18 @@ Private internal tool that lets a designer place Jira tickets onto the Figma can
 
 ## Architecture
 
-Three apps in an npm workspace monorepo:
+Two apps in an npm workspace monorepo:
 
 | App | Purpose |
 | --- | --- |
-| `apps/figma-widget` | Widget that renders the persistent ticket card on the canvas |
-| `apps/figma-plugin` | Plugin UI (React) for auth + issue search + widget insertion |
+| `apps/figma-plugin` | Combined Figma plugin + widget: React UI for auth/search and a canvas `TicketWidget` for placed tickets |
 | `apps/backend` | Node/Express backend. Owns Jira OAuth tokens, fetches issues, (later) handles webhooks |
 
 Shared TypeScript types live in `packages/shared-types`.
+
+### Why plugin + widget share one manifest
+
+`figma.createNodeFromJSXAsync(<TicketWidget />)` and `WidgetNode.setWidgetSyncedState(...)` are only allowed when the calling sandbox's `figma.widgetId` matches the target widget — in other words, the widget must be registered in the _same_ manifest as the plugin that's inserting it. A separate widget workspace would have prevented the plugin from seeding a newly inserted widget with ticket data, so the two are bundled under a single manifest that declares both `api` and `widgetApi` and sets `containsWidget: true`.
 
 ### Data flow (MVP)
 
@@ -29,14 +32,23 @@ Tokens are **only** stored on the backend. Figma never sees a Jira token.
 ```
 /
 ├── apps/
-│   ├── backend/        Express server (Jira OAuth + API proxy)
-│   ├── figma-plugin/   Figma plugin (code.ts sandbox + React UI)
-│   └── figma-widget/   Figma widget (widget.tsx)
+│   ├── backend/                Express server (Jira OAuth + API proxy)
+│   └── figma-plugin/
+│       ├── manifest.json       Single manifest declaring plugin + widget
+│       └── src/
+│           ├── code.tsx        Sandbox entry: registers widget, handles menu command
+│           ├── ui/             React plugin UI (auth + search + insert)
+│           └── widget/         TicketWidget + shared sandbox constants
 ├── packages/
-│   └── shared-types/   Shared ticket type + contracts
-├── package.json        npm workspaces root
-└── tsconfig.base.json  shared compiler options
+│   └── shared-types/           Shared ticket type + contracts
+├── package.json                npm workspaces root
+└── tsconfig.base.json          shared compiler options
 ```
+
+The plugin workspace has two tsconfigs because the two surfaces use different JSX factories:
+
+- `tsconfig.json` — React UI in `src/ui/**` (`jsx: react-jsx`).
+- `tsconfig.sandbox.json` — sandbox + widget in `src/code.tsx` and `src/widget/**` (`jsx: react` with `jsxFactory: figma.widget.h`).
 
 ## Getting started
 
@@ -44,11 +56,10 @@ Tokens are **only** stored on the backend. Figma never sees a Jira token.
 npm install
 cp apps/backend/.env.example apps/backend/.env   # fill in Jira creds
 npm run dev:backend   # http://localhost:4000/health
-npm run dev:plugin    # builds plugin + UI in watch mode
-npm run dev:widget    # builds widget in watch mode
+npm run dev:plugin    # builds sandbox + UI in watch mode
 ```
 
-Then load `apps/figma-plugin/manifest.json` and `apps/figma-widget/manifest.json` in Figma via **Plugins → Development → Import from manifest**.
+Then load `apps/figma-plugin/manifest.json` in Figma via **Plugins → Development → Import from manifest**. The same manifest registers the plugin menu command (Insert Jira ticket) and the `TicketWidget` you can drop on the canvas.
 
 ## Jira OAuth setup (Phase 2)
 
@@ -101,11 +112,26 @@ The plugin's **Reconnect Jira** button on an auth error loops the user back thro
 1. Complete Phase 2 auth so the plugin is connected.
 2. Type at least 2 characters into the search input — results appear after a 300ms debounce.
 3. Paste an issue key like `ABC-123` to jump straight to that ticket (exact match is prepended to results).
-4. Click a row to select it. The **Selected** panel appears; the insert button is intentionally disabled until Phase 4.
+4. Click a row to select it. The **Selected** panel appears with an active **Insert ticket on canvas** button (Phase 4).
 5. Force a reauth path by revoking the OAuth grant in Atlassian (User menu → Settings → Connected apps) and searching again — the UI should show **Reconnect Jira**.
+
+## Widget insertion + refresh (Phase 4)
+
+When a ticket is selected and the user clicks **Insert ticket on canvas**, the plugin UI posts `{ type: "insert-widget", ticket }` to the sandbox (`code.tsx`). The sandbox:
+
+1. Calls `figma.createNodeFromJSXAsync(<TicketWidget />)` to materialise a `WidgetNode`.
+2. Seeds it via `WidgetNode.setWidgetSyncedState(...)` with `ticket`, `lastSyncedAt`, `isLoading`, `error`.
+3. Centers it on the current viewport, selects it, and scrolls it into view.
+
+The widget reads the synced state and renders the ticket card. A **Refresh** button re-fetches the ticket from `GET /api/issues/:issueKey` (using the `installationId` stored in `figma.clientStorage`) and rewrites the synced state. Token refresh, reauth detection, and `not_found` handling are all delegated to the backend — the widget never talks to Jira directly.
+
+### Testing the insertion flow locally
+
+1. Search for and select an issue.
+2. Click **Insert ticket on canvas** — a confirmation appears below the button and the widget is placed in the viewport.
+3. Click the widget's **Refresh** chip to re-pull the ticket via the backend. The relative timestamp updates.
+4. Revoke the OAuth grant, then click **Refresh** — the widget displays a friendly "reconnect" message pulled from the backend's `reauth_required` error code.
 
 ## Status
 
-Phase 3 complete: token refresh, issue search, get-by-key, plugin search UI with selection state.
-
-Next phase: widget insertion flow (plugin → widget synced state), canvas rendering, and a manual refresh button on the widget.
+Phase 4 complete: plugin + widget merged under one manifest, programmatic widget insertion with pre-seeded synced state, canvas ticket card with manual refresh.

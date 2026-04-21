@@ -1,12 +1,15 @@
 {
-  "name": "Jira Tickets (Plugin)",
-  "id": "figma-jira-plugin-dev",
+  "name": "Jira Tickets",
+  "id": "figma-jira-dev",
   "api": "1.0.0",
+  "widgetApi": "1.0.0",
   "main": "dist/code.js",
-  "ui": "dist/ui.html",
+  "ui": "dist/index.html",
   "editorType": ["figma", "figjam"],
+  "containsWidget": true,
+  "menu": [{ "name": "Insert Jira ticket", "command": "insert" }],
   "networkAccess": {
     "allowedDomains": ["http://localhost:4000", "https://*.atlassian.net"],
-    "reasoning": "Talks to the local backend for Jira OAuth + issue fetching."
+    "reasoning": "Plugin + widget talk to the local backend for Jira OAuth, search, and refresh."
   }
 }
