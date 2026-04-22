@@ -13,7 +13,8 @@ export type BackendErrorCode =
   | "reauth_required"
   | "not_found"
   | "upstream_error"
-  | "bad_request";
+  | "bad_request"
+  | "link_not_found";
 
 export type BackendError = {
   code: BackendErrorCode;
@@ -31,6 +32,8 @@ export type WidgetTicketState = {
   lastSyncedAt: string | null;
   isLoading: boolean;
   error: string | null;
+  backendLinkId: string | null;
+  isStale: boolean;
 };
 
 export type JiraSiteSummary = {
@@ -60,6 +63,43 @@ export type GetIssueResponse =
 
 export type SearchIssuesResponse =
   | { ok: true; tickets: JiraTicketSummary[] }
+  | { ok: false; error: BackendError };
+
+/**
+ * Public view of a backend widget-link record. The plugin + widget only see
+ * the freshness-relevant fields; internal columns stay server-side.
+ */
+export type WidgetLinkSummary = {
+  linkId: string;
+  widgetNodeId: string;
+  issueId: string;
+  issueKey: string;
+  lastSyncedAt: string;
+  lastKnownIssueUpdatedAt: string;
+  isStale: boolean;
+};
+
+export type RegisterWidgetRequest = {
+  installationId: string;
+  widgetNodeId: string;
+  widgetId: string;
+  fileKey: string | null;
+  fileName: string | null;
+  issueId: string;
+  issueKey: string;
+  issueUpdatedAt: string;
+};
+
+export type RegisterWidgetResponse =
+  | { ok: true; link: WidgetLinkSummary }
+  | { ok: false; error: BackendError };
+
+export type WidgetStatusResponse =
+  | { ok: true; link: WidgetLinkSummary }
+  | { ok: false; error: BackendError };
+
+export type RefreshWidgetResponse =
+  | { ok: true; ticket: JiraTicketSummary; link: WidgetLinkSummary }
   | { ok: false; error: BackendError };
 
 // Messages from plugin sandbox (code.ts) → UI iframe.

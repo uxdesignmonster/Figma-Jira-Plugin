@@ -9,4 +9,6 @@ export const WIDGET_STATE_KEYS = {
   lastSyncedAt: "lastSyncedAt",
   isLoading: "isLoading",
   error: "error",
+  backendLinkId: "backendLinkId",
+  isStale: "isStale",
 } as const;

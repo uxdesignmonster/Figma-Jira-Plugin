@@ -48,3 +48,11 @@ export class BadRequestError extends JiraClientError {
     super(message);
   }
 }
+
+export class LinkNotFoundError extends JiraClientError {
+  readonly code = "link_not_found";
+  readonly httpStatus = 404;
+  constructor(message = "Widget link not found.") {
+    super(message);
+  }
+}
