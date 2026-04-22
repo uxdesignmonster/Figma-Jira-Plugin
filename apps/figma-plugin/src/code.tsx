@@ -133,6 +133,9 @@ function seedWidgetState(
     [WIDGET_STATE_KEYS.error]: opts.errorMessage,
     [WIDGET_STATE_KEYS.backendLinkId]: opts.backendLinkId,
     [WIDGET_STATE_KEYS.isStale]: false,
+    // Record which node id the link was registered against. The widget code
+    // compares this with `useWidgetNodeId()` at render time to detect clones.
+    [WIDGET_STATE_KEYS.registeredNodeId]: widgetNode.id,
   });
 }
 

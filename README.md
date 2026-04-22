@@ -67,14 +67,25 @@ The plugin workspace has two tsconfigs because the two surfaces use different JS
 - `tsconfig.json` — React UI in `src/ui/**` (`jsx: react-jsx`).
 - `tsconfig.sandbox.json` — sandbox + widget in `src/code.tsx` and `src/widget/**` (`jsx: react` with `jsxFactory: figma.widget.h`).
 
-## Getting started
+## Getting started (local)
 
 ```bash
+# 1. Install deps
 npm install
-cp apps/backend/.env.example apps/backend/.env   # fill in Jira creds
+
+# 2. Provision Postgres (first time only)
+createdb figma_jira_dev                                # or any method you prefer
+cp apps/backend/.env.example apps/backend/.env         # fill in Jira creds + DATABASE_URL
+
+# 3. Run migrations
+npm run db:migrate --workspace apps/backend
+
+# 4. Run everything
 npm run dev:backend   # http://localhost:4000/health
 npm run dev:plugin    # builds sandbox + UI in watch mode
 ```
+
+You can skip Postgres for very quick prototyping — unset `DATABASE_URL` and the backend falls back to in-memory stores with a warning. Production (`NODE_ENV=production`) requires `DATABASE_URL` and `JIRA_WEBHOOK_SECRET` at startup.
 
 Then load `apps/figma-plugin/manifest.json` in Figma via **Plugins → Development → Import from manifest**. The same manifest registers the plugin menu command (Insert Jira ticket) and the `TicketWidget` you can drop on the canvas.
 
@@ -88,13 +99,18 @@ Then load `apps/figma-plugin/manifest.json` in Figma via **Plugins → Developme
 
 ### Required environment variables (backend)
 
+See `apps/backend/.env.example` for annotated defaults.
+
 | Var | Required | Notes |
 | --- | --- | --- |
+| `NODE_ENV` | no | `development` (default) or `production`. Production enforces DB + webhook secret. |
 | `PORT` | no | Defaults to `4000`. |
+| `PUBLIC_BASE_URL` | no | Public origin of the backend (e.g. `https://example.com`). Used in startup logs for the webhook URL. |
 | `JIRA_CLIENT_ID` | **yes** | From your Atlassian OAuth app. |
 | `JIRA_CLIENT_SECRET` | **yes** | From your Atlassian OAuth app. |
 | `JIRA_REDIRECT_URI` | **yes** | Must match the callback URL registered in Atlassian. Default: `http://localhost:4000/auth/jira/callback`. |
-| `DATABASE_URL` | no | Unused in Phase 2 (tokens live in-memory). Reserved for the Postgres `TokenStore` in Phase 3+. |
+| `DATABASE_URL` | **yes in prod** | Postgres connection string. SSL is auto-enabled for managed-Postgres hosts. In dev, unset = in-memory stores. |
+| `JIRA_WEBHOOK_SECRET` | **yes in prod** | Unguessable string embedded as a path segment on the webhook URL. See § Webhook security. |
 
 ### Running the auth flow locally
 
@@ -190,58 +206,175 @@ The widget surfaces `isStale` in two places:
 - A one-time `useEffect` fires `GET /api/widgets/:linkId/status` when the widget renders for the first time in a sandbox session. A module-level `Set` guards it so the effect firing on every rerender doesn't spam the backend.
 - The refresh button prefers `POST /api/widgets/:linkId/refresh` so the stale flag clears atomically with the Jira fetch. If the widget has no `backendLinkId` (e.g. backend was down at insert time) it falls back to the original `GET /api/issues/:key` path.
 
-### Jira webhook setup
+## Durability + security (Phase 6)
 
-In the Atlassian developer console for your OAuth app, add a webhook pointed at
-`POST https://<your-backend>/webhooks/jira` and subscribe to the
-`jira:issue_updated`, `jira:issue_created`, and `jira:issue_deleted` events for
-the projects you care about. Webhook signature verification is not yet wired
-up; for local testing, bind the backend only to localhost (or use a tunnel
-like `ngrok http 4000`).
+### Persistent storage (Postgres)
 
-### Testing the freshness flow locally
+All Phase 5 stores are now behind `TokenStore`, `WidgetLinkStore`, and
+`IssueSnapshotStore` interfaces with both **in-memory** (dev) and
+**Postgres** (production) implementations selected by `storage/factory.ts`.
+Webhook dedup stays in-memory by design — its TTL is short, a restart at
+worst re-marks widgets stale (idempotent), and persisting every delivery
+would be wasteful.
 
-1. Start the backend and plugin as in earlier phases; connect Jira in the plugin.
-2. Insert a ticket from the plugin UI. Watch the backend log for `POST /api/widgets 201` — that confirms the link was registered and the widget got a `backendLinkId`.
-3. Simulate a webhook: replace `YOUR_ISSUE_ID` / `YOUR_ISSUE_KEY` below.
-   ```bash
-   curl -X POST http://localhost:4000/webhooks/jira \
-     -H "Content-Type: application/json" \
-     -d '{
-       "id": "evt-1",
-       "webhookEvent": "jira:issue_updated",
-       "timestamp": '"$(date +%s000)"',
-       "issue": {
-         "id": "YOUR_ISSUE_ID",
-         "key": "YOUR_ISSUE_KEY",
-         "self": "https://example.atlassian.net/rest/api/3/issue/YOUR_ISSUE_ID",
-         "fields": {
-           "summary": "New summary from webhook",
-           "status": { "name": "In Progress" },
-           "assignee": { "displayName": "Casey Example" },
-           "updated": "'"$(date -u +%Y-%m-%dT%H:%M:%S.000%z)"'"
-         }
-       }
-     }'
-   ```
-   Expect `{"ok":true,"result":{"status":"accepted","transitionedLinkIds":[...]}}`.
-4. In Figma, deselect and re-select the widget (or click it to force a rerender). The "Updated in Jira · refresh to sync" pill appears. Re-sending the same curl returns `status: "duplicate"` and does nothing.
-5. Click **Refresh** on the widget. The card updates, the stale pill disappears, and the backend log shows `POST /api/widgets/<linkId>/refresh`.
+Schema lives in `apps/backend/migrations/*.sql` and is applied with:
 
-### Resilience + known limitations
+```bash
+npm run db:migrate --workspace apps/backend
+```
 
-- **Widget registration fails (backend down at insert time):** The widget is still placed and seeded with the ticket. The synced-state error slot shows `Backend unreachable …` once. `backendLinkId` stays `null`, so refresh falls back to the per-issue endpoint and staleness is unobservable for that widget. Re-inserting the ticket re-registers it.
-- **Backend restarts:** All stores are in-memory, so links + snapshots are lost on restart. Existing widgets will see `link_not_found` on their next status check. The widget UI shows "Backend lost this widget's link. Reinsert to restore sync." — users must reinsert. Swapping `InMemory*Store` for persistent implementations closes this gap.
-- **Webhook delivered for an issue with no linked widgets:** Snapshot is still updated so a future insertion for the same issue starts with a known baseline. `transitionedLinkIds` is `[]`.
-- **Auth expired during refresh:** The existing `client.ts` path returns `reauth_required`; the widget translates it to "Jira session expired. Open the plugin to reconnect." Stale state is *not* cleared because the refresh did not succeed.
-- **Duplicate webhook deliveries:** Handled by `WebhookDedupStore`; key is Atlassian's `id` when present, otherwise `${issueId}:${event}:${timestamp}`.
-- **Widget duplication in Figma:** `WidgetNode.clone()` produces a node with the same `widgetId` but a *new* `node.id`. The cloned widget therefore has no backend link until the user refreshes it — and our refresh endpoints only work via `linkId`. Current behavior: the clone's synced state still carries the *original* widget's `backendLinkId`, so its **Refresh** button hits the original link (which clears its stale flag for both visually). This is documented rather than fixed in Phase 5; a follow-up could detect duplicated nodes in a `documentchange` handler and re-register on first interaction.
-- **Webhook signature verification:** Not implemented. Treat `/webhooks/jira` as trusted only on localhost or behind a tunnel with access control until this is wired up.
+The runner (`src/db/migrate.ts`) tracks applied files in a `_migrations`
+table and runs each file in a transaction, so it's safe to rerun on every
+deploy.
+
+| Table | Key columns | Purpose |
+| --- | --- | --- |
+| `jira_connections` | PK `installation_id` | OAuth tokens + site + account |
+| `widget_links` | PK `link_id`, UNIQUE `(installation_id, widget_node_id)`, INDEX `issue_id`/`issue_key` | One row per inserted widget instance |
+| `issue_snapshots` | PK `issue_id`, INDEX `issue_key` | Last-known issue content + payload hash |
+| `_migrations` | PK `name` | Migration bookkeeping |
+
+Managed Postgres URLs (Neon, Supabase, Render, Railway, RDS) auto-enable
+SSL. Append `?sslmode=disable` to force off.
+
+### Webhook security
+
+Jira Cloud OAuth-app webhooks do not offer HMAC signing, so signature
+verification isn't an option. The trust anchor is an unguessable URL:
+
+```
+POST ${PUBLIC_BASE_URL}/webhooks/jira/${JIRA_WEBHOOK_SECRET}
+```
+
+`JIRA_WEBHOOK_SECRET` is compared with `timingSafeEqual`, and a wrong/
+missing secret returns an opaque `404` so scanners can't distinguish a
+valid-URL shape from an invalid one. The route also rejects non-object
+payloads and enforces a 1 MB JSON body limit.
+
+**Recommended production setup:**
+- Terminate TLS at a reverse proxy or PaaS; never expose plain HTTP.
+- Optional defence in depth: allowlist Atlassian's published webhook IP
+  ranges at the proxy layer.
+- Rotate `JIRA_WEBHOOK_SECRET` by updating the registered webhook URL in
+  Jira and restarting the backend.
+- Production startup (`NODE_ENV=production`) refuses to boot without
+  `JIRA_WEBHOOK_SECRET`.
+
+### Widget duplication
+
+Every register-time call now records the node id the link was created for
+in synced state (`registeredNodeId`). On every render the widget compares
+`useWidgetNodeId()` against that value:
+
+- **Match:** normal mode — freshness check runs, refresh uses the link.
+- **Mismatch (a clone):** the widget clears the carried-over
+  `backendLinkId` and `registeredNodeId` immediately, shows a
+  "Not linked to backend · reconnect to track Jira changes" pill, and
+  renames its primary action to **Reconnect ticket**. Clicking it calls
+  `POST /api/widgets` with the current ticket and the clone's real node id,
+  producing a fresh link record.
+
+Cloned widgets therefore never permanently masquerade as the original.
+The only time the clone-vs-original stays ambiguous is the window between
+clone creation and the next render — which fires automatically in Figma
+well before any user interaction.
+
+### Link recovery
+
+When any server call returns `link_not_found` (deleted link, restored
+database, etc.), the widget drops the stored `backendLinkId` and falls
+through to the same **Reconnect ticket** path as the clone case. The
+ticket data itself is preserved from synced state, so the user never sees
+a blank card.
+
+### Testing locally
+
+**Normal insert + refresh**
+
+1. Start backend (`npm run dev:backend`) and plugin (`npm run dev:plugin`).
+2. Connect Jira in the plugin, search, click **Insert ticket on canvas**.
+3. Backend log shows `POST /api/widgets → 201` and `storage: postgres`.
+4. Click **Refresh** on the widget; `lastSyncedAt` bumps.
+
+**Stale + webhook**
+
+```bash
+# Replace ISSUE_ID / ISSUE_KEY with the ticket you inserted:
+curl -X POST "http://localhost:4000/webhooks/jira/$JIRA_WEBHOOK_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "evt-1",
+    "webhookEvent": "jira:issue_updated",
+    "timestamp": '"$(date +%s000)"',
+    "issue": {
+      "id": "ISSUE_ID",
+      "key": "ISSUE_KEY",
+      "self": "https://example.atlassian.net/rest/api/3/issue/ISSUE_ID",
+      "fields": {
+        "summary": "New summary",
+        "status": { "name": "In Progress" },
+        "assignee": { "displayName": "Casey" },
+        "updated": "'"$(date -u +%Y-%m-%dT%H:%M:%S.000%z)"'"
+      }
+    }
+  }'
+```
+- Expect `status: "accepted"` and `transitionedLinkIds` listing your link.
+- Re-send the same request → `status: "duplicate"`.
+- Wrong secret → `404`.
+- In Figma, click the widget (triggers a rerender); the "Updated in Jira"
+  pill appears. Click **Refresh** — pill clears, card updates.
+
+**Backend restart persistence**
+
+1. Insert a widget. Note the `linkId` from the backend log.
+2. `Ctrl+C` the backend, then start it again.
+3. In Figma, click the widget — the mount effect hits
+   `GET /api/widgets/:linkId/status` and gets back the *same* link. No
+   reinsert required.
+4. Disable Postgres (`DATABASE_URL=` empty) and repeat — the widget gets
+   `link_not_found` on the next check, drops the link id, and shows
+   **Reconnect ticket**. Clicking Reconnect produces a new link.
+
+**Duplicate widget**
+
+1. Right-click the canvas widget → **Duplicate** (or `Cmd/Ctrl+D`).
+2. The clone renders with a **Not linked to backend** pill and a
+   **Reconnect ticket** action (its own `useWidgetNodeId()` no longer
+   matches the synced `registeredNodeId`).
+3. Click **Reconnect ticket** → a new link row appears in `widget_links`;
+   the clone now tracks staleness independently of the original.
+
+**Broken link recovery**
+
+```bash
+# Delete a link row directly:
+psql "$DATABASE_URL" -c "DELETE FROM widget_links WHERE link_id='LINK_ID';"
+```
+In Figma, interact with the widget. It detects `link_not_found`, drops
+`backendLinkId`, and shows **Reconnect ticket** — clicking it re-creates
+the link.
+
+### Remaining limitations
+
+- **Webhook signature verification** is impossible on Jira Cloud OAuth-app
+  webhooks. The URL-secret + optional IP allowlist is the best we can do
+  without Atlassian adding signed payloads.
+- **Clone detection window.** Between clone creation and first render,
+  the clone technically holds the original's `backendLinkId`. No network
+  call happens in that window, so nothing changes on the backend — but
+  code that reads synced state without rendering could be misled. None of
+  our code does that.
+- **`figma.fileKey` is undefined** in Figma draft files. We store `null`
+  rather than fabricating one. `fileKey` is informational only today.
+- **Token revocation.** Disconnect clears the backend row but doesn't yet
+  call Atlassian's revoke endpoint. Low-priority — tokens still expire.
 
 ## Status
 
-Phase 5 complete: backend widget-link persistence, Jira webhook ingestion,
-webhook-driven stale marking, widget freshness UI, and refresh-clears-stale
-semantics. In-memory stores only — Postgres/Supabase implementations can slot
-in behind the existing interfaces without touching routes or the freshness
-service.
+Phase 6 complete: Postgres-backed persistence with migrations, URL-secret
+webhook security with constant-time comparison, clone detection via
+`useWidgetNodeId()`, and a **Reconnect ticket** recovery path that covers
+both clones and backend-lost links. Production startup requires
+`DATABASE_URL` and `JIRA_WEBHOOK_SECRET`; dev mode still works with
+in-memory stores and an open webhook endpoint (with a loud warning).

@@ -1,6 +1,7 @@
 import type {
   GetIssueResponse,
   JiraTicketSummary,
+  RegisterWidgetResponse,
   RefreshWidgetResponse,
   WidgetStatusResponse,
 } from "@figma-jira/shared-types";
@@ -11,7 +12,15 @@ import {
 } from "./constants";
 
 const { widget } = figma;
-const { AutoLayout, Text, useSyncedState, useEffect, waitForTask, SVG } = widget;
+const {
+  AutoLayout,
+  Text,
+  useSyncedState,
+  useEffect,
+  useWidgetNodeId,
+  waitForTask,
+  SVG,
+} = widget;
 
 const COLORS = {
   surface: "#FFFFFF",
@@ -27,16 +36,20 @@ const COLORS = {
   staleBorder: "#F4D58A",
 } as const;
 
-// 12px refresh icon rendered as inline SVG so the widget has no external deps.
 const REFRESH_ICON_SRC = `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#6B7280" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3.2-6.9"/><polyline points="21 4 21 10 15 10"/></svg>`;
 
 /**
- * Module-level guard so the "check staleness on mount" effect runs once per
- * link per widget-sandbox load. Widget `useEffect` fires on every render
- * (selection changes, state changes, etc.) so an unguarded fetch would spam
- * the backend.
+ * Per-sandbox guard: the mount effect fires on every render (widget
+ * `useEffect` has no deps array). We track which (nodeId, linkId) pairs have
+ * already been synced so we only fire one freshness or reconciliation fetch
+ * per widget per sandbox load.
  */
-const freshnessChecked = new Set<string>();
+const reconciled = new Set<string>();
+
+type LinkState =
+  | { kind: "ok"; linkId: string }
+  | { kind: "unlinked" }
+  | { kind: "broken"; reason: string };
 
 export function TicketWidget() {
   const [ticket, setTicket] = useSyncedState<JiraTicketSummary | null>(
@@ -55,7 +68,7 @@ export function TicketWidget() {
     WIDGET_STATE_KEYS.error,
     null,
   );
-  const [backendLinkId] = useSyncedState<string | null>(
+  const [backendLinkId, setBackendLinkId] = useSyncedState<string | null>(
     WIDGET_STATE_KEYS.backendLinkId,
     null,
   );
@@ -63,12 +76,53 @@ export function TicketWidget() {
     WIDGET_STATE_KEYS.isStale,
     false,
   );
+  const [registeredNodeId, setRegisteredNodeId] = useSyncedState<string | null>(
+    WIDGET_STATE_KEYS.registeredNodeId,
+    null,
+  );
 
+  const myNodeId = useWidgetNodeId();
+  const isClone =
+    registeredNodeId !== null && registeredNodeId !== myNodeId;
+
+  const linkState: LinkState = (() => {
+    if (isClone) return { kind: "unlinked" };
+    if (!backendLinkId) return { kind: "unlinked" };
+    return { kind: "ok", linkId: backendLinkId };
+  })();
+
+  // One-shot reconciliation: detect clones (clear stale link id), check
+  // staleness on the real link. See `reconciled` guard above.
   useEffect(() => {
-    if (!ticket || !backendLinkId) return;
-    if (freshnessChecked.has(backendLinkId)) return;
-    freshnessChecked.add(backendLinkId);
-    waitForTask(checkFreshness(backendLinkId, isStale, setIsStale));
+    if (!ticket) return;
+    const guard = `${myNodeId}|${backendLinkId ?? "none"}|${registeredNodeId ?? "none"}`;
+    if (reconciled.has(guard)) return;
+    reconciled.add(guard);
+
+    if (isClone) {
+      // Clone detected: we can't re-register yet (need installationId +
+      // user-triggered network call). Just clear the stale carried-over
+      // link id so the "Reconnect ticket" button appears.
+      setBackendLinkId(null);
+      setRegisteredNodeId(null);
+      setIsStale(false);
+      return;
+    }
+
+    if (!backendLinkId) return;
+    waitForTask(
+      reconcileFreshness(backendLinkId, (nextStale, errorKind) => {
+        if (errorKind === "link_not_found") {
+          // Backend lost our link (DB restore, manual delete). Drop the
+          // local link id; UI will show Reconnect.
+          setBackendLinkId(null);
+          setRegisteredNodeId(null);
+          setIsStale(false);
+        } else if (nextStale !== null && nextStale !== isStale) {
+          setIsStale(nextStale);
+        }
+      }),
+    );
   });
 
   async function refresh() {
@@ -76,14 +130,17 @@ export function TicketWidget() {
     setIsLoading(true);
     setError(null);
     try {
-      // Prefer the link-aware refresh endpoint — it uses the installation
-      // stored server-side and clears stale state atomically. Fallback to the
-      // per-issue endpoint for widgets that never got a backend link (e.g.
-      // backend was down during insert).
-      const result = backendLinkId
-        ? await refreshViaLink(backendLinkId)
-        : await refreshViaIssueKey(ticket.issueKey);
+      const result =
+        linkState.kind === "ok"
+          ? await refreshViaLink(linkState.linkId)
+          : await refreshViaIssueKey(ticket.issueKey);
       if (!result.ok) {
+        if (result.code === "link_not_found") {
+          // Drop the link and fall through to the Reconnect UI instead of
+          // repeatedly surfacing the error.
+          setBackendLinkId(null);
+          setRegisteredNodeId(null);
+        }
         setError(translateError(result.code, result.message));
         return;
       }
@@ -92,6 +149,30 @@ export function TicketWidget() {
       setIsStale(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Refresh failed.");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function reconnect() {
+    if (!ticket || isLoading) return;
+    setIsLoading(true);
+    setError(null);
+    try {
+      const result = await registerLinkFor(ticket, myNodeId);
+      if (!result.ok) {
+        setError(translateError(result.code, result.message));
+        return;
+      }
+      setBackendLinkId(result.linkId);
+      setRegisteredNodeId(myNodeId);
+      setLastSyncedAt(new Date().toISOString());
+      setIsStale(false);
+      // Reset the guard so a follow-up freshness check can run if Jira
+      // changes under the new link.
+      reconciled.clear();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Reconnect failed.");
     } finally {
       setIsLoading(false);
     }
@@ -113,6 +194,8 @@ export function TicketWidget() {
       </AutoLayout>
     );
   }
+
+  const unlinked = linkState.kind === "unlinked";
 
   return (
     <AutoLayout
@@ -197,6 +280,19 @@ export function TicketWidget() {
         </AutoLayout>
       )}
 
+      {unlinked && (
+        <AutoLayout
+          padding={{ vertical: 4, horizontal: 8 }}
+          cornerRadius={6}
+          fill={COLORS.pillBg}
+          width="hug-contents"
+        >
+          <Text fontSize={11} fill={COLORS.muted}>
+            Not linked to backend · reconnect to track Jira changes
+          </Text>
+        </AutoLayout>
+      )}
+
       {error !== null && (
         <AutoLayout
           padding={8}
@@ -225,16 +321,20 @@ export function TicketWidget() {
           stroke={COLORS.border}
           spacing={6}
           verticalAlignItems="center"
-          onClick={refresh}
+          onClick={unlinked ? reconnect : refresh}
           hoverStyle={{ fill: COLORS.loadingBg }}
         >
           <SVG src={REFRESH_ICON_SRC} />
           <Text fontSize={11} fill={COLORS.muted}>
             {isLoading
-              ? "Refreshing…"
-              : lastSyncedAt
-                ? `Refreshed ${formatRelative(lastSyncedAt)}`
-                : "Refresh"}
+              ? unlinked
+                ? "Reconnecting…"
+                : "Refreshing…"
+              : unlinked
+                ? "Reconnect ticket"
+                : lastSyncedAt
+                  ? `Refreshed ${formatRelative(lastSyncedAt)}`
+                  : "Refresh"}
           </Text>
         </AutoLayout>
         <Text
@@ -288,10 +388,53 @@ async function refreshViaIssueKey(issueKey: string): Promise<RefreshOutcome> {
     : { ok: false, code: body.error.code, message: body.error.message };
 }
 
-async function checkFreshness(
+type RegisterOutcome =
+  | { ok: true; linkId: string }
+  | { ok: false; code: string; message: string };
+
+async function registerLinkFor(
+  ticket: JiraTicketSummary,
+  widgetNodeId: string,
+): Promise<RegisterOutcome> {
+  const installationId = await figma.clientStorage.getAsync(
+    INSTALLATION_STORAGE_KEY,
+  );
+  if (typeof installationId !== "string" || installationId.length === 0) {
+    return {
+      ok: false,
+      code: "unauthenticated",
+      message: "Not connected. Open the Jira plugin to reconnect.",
+    };
+  }
+  const res = await fetch(`${BACKEND_URL}/api/widgets`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({
+      installationId,
+      widgetNodeId,
+      widgetId: figma.widgetId ?? "",
+      fileKey: figma.fileKey ?? null,
+      fileName: figma.root?.name ?? null,
+      issueId: ticket.issueId,
+      issueKey: ticket.issueKey,
+      issueUpdatedAt: ticket.updatedAt,
+    }),
+  });
+  const body = (await res.json()) as RegisterWidgetResponse;
+  return body.ok
+    ? { ok: true, linkId: body.link.linkId }
+    : { ok: false, code: body.error.code, message: body.error.message };
+}
+
+async function reconcileFreshness(
   linkId: string,
-  currentStale: boolean,
-  setStale: (v: boolean) => void,
+  apply: (
+    nextStale: boolean | null,
+    errorKind: "link_not_found" | "other" | null,
+  ) => void,
 ): Promise<void> {
   try {
     const res = await fetch(
@@ -300,16 +443,13 @@ async function checkFreshness(
     );
     const body = (await res.json()) as WidgetStatusResponse;
     if (!body.ok) {
-      if (body.error.code === "link_not_found") {
-        // Backend lost the link (restart, manual delete). Re-register on next
-        // refresh via the issue-key fallback. Don't set stale on this path.
-      }
+      apply(null, body.error.code === "link_not_found" ? "link_not_found" : "other");
       return;
     }
-    if (body.link.isStale !== currentStale) setStale(body.link.isStale);
+    apply(body.link.isStale, null);
   } catch {
-    // Backend unreachable — keep whatever synced state we had. A stale flag
-    // can only be set by a successful status check, so silent-fail is safe.
+    // Backend unreachable — keep current synced state.
+    apply(null, null);
   }
 }
 
@@ -325,7 +465,7 @@ function translateError(code: string, message: string): string {
     return "Issue no longer accessible on Jira.";
   }
   if (code === "link_not_found") {
-    return "Backend lost this widget's link. Reinsert to restore sync.";
+    return "Backend lost this widget's link. Click Reconnect ticket to repair.";
   }
   return message;
 }
